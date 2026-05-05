@@ -9,7 +9,7 @@ from PIL.ImageQt import ImageQt
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QIcon, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
+    QFileDialog, QFrame, QGraphicsScene, QGraphicsSimpleTextItem,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPushButton, QProgressBar, QSplitter, QTableWidget,
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
@@ -22,6 +22,10 @@ from models.field import DetectedField
 from models.ocr_result import OCRPageResult
 from services.excel_exporter import ExcelExporter
 from services.template_manager import TemplateManager
+from services.label_store import LabelStore
+from core.ml_field_predictor import MLFieldPredictor
+from models.label_data import LabeledRegion
+from ui.selection_view import SelectionGraphicsView
 from utils.logging_config import setup_logging
 
 
@@ -45,6 +49,10 @@ class MainWindow(QMainWindow):
         self.detected_fields: list[DetectedField] = []
         self.current_document_name = ""
         self.batch_files: list[Path] = []
+        self.label_store = LabelStore()
+        self.ml_predictor = MLFieldPredictor()
+        self.ml_predictor.train(self.label_store.load())
+        self.last_selected_region: tuple[int,int,int,int] | None = None
 
         self._build_ui()
         self._apply_styles()
@@ -74,9 +82,11 @@ class MainWindow(QMainWindow):
 
         self.ocr_button = QPushButton("OCR + تشخیص فیلد"); self.ocr_button.clicked.connect(self._run_ocr_current_page)
         self.export_button = QPushButton("خروجی Excel"); self.export_button.clicked.connect(self._export_selected_to_excel)
+        self.label_button = QPushButton("برچسب‌گذاری ناحیه"); self.label_button.clicked.connect(self._assign_label_to_region)
+        self.predict_button = QPushButton("پیش‌بینی جایگاه فیلد"); self.predict_button.clicked.connect(self._predict_label_position)
         self.file_list = QListWidget()
         layout.addWidget(self._section_title("فایل‌ها"))
-        for w in [self.import_button, self.batch_import_button, self.batch_run_button, self.ocr_button, self.export_button, self.file_list]:
+        for w in [self.import_button, self.batch_import_button, self.batch_run_button, self.ocr_button, self.export_button, self.label_button, self.predict_button, self.file_list]:
             layout.addWidget(w)
         return panel
 
@@ -86,7 +96,8 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         for text, fn in [("صفحه قبل", self._show_prev_page), ("صفحه بعد", self._show_next_page), ("-", lambda: self._change_zoom(-0.1)), ("+", lambda: self._change_zoom(0.1))]:
             b = QPushButton(text); b.clicked.connect(fn); controls.addWidget(b)
-        self.viewer = QGraphicsView(panel); self.viewer_scene = QGraphicsScene(self.viewer); self.viewer.setScene(self.viewer_scene)
+        self.viewer = SelectionGraphicsView(panel); self.viewer_scene = QGraphicsScene(self.viewer); self.viewer.setScene(self.viewer_scene)
+        self.viewer.region_selected.connect(self._on_region_selected)
         layout.addWidget(self._section_title("پیش‌نمایش")); layout.addWidget(self.page_label); layout.addLayout(controls); layout.addWidget(self.viewer, 1)
         return panel
 
@@ -174,6 +185,43 @@ class MainWindow(QMainWindow):
         self.logger.info("[INFO] Batch processing completed")
 
     # existing methods below
+
+    def _on_region_selected(self, x: int, y: int, w: int, h: int) -> None:
+        self.last_selected_region = (x, y, w, h)
+        self.status_text.setText(f"وضعیت: ناحیه انتخاب شد ({x},{y},{w},{h})")
+
+    def _assign_label_to_region(self) -> None:
+        if not self.last_selected_region:
+            QMessageBox.information(self, "اطلاع", "ابتدا یک ناحیه روی سند انتخاب کنید")
+            return
+        label, ok = QInputDialog.getText(self, "برچسب ناحیه", "نام برچسب:")
+        if not ok or not label.strip():
+            return
+        x, y, w, h = self.last_selected_region
+        sample = LabeledRegion(
+            document_name=self.current_document_name or "unknown",
+            page_index=self.current_page_index,
+            label=label.strip(),
+            x=x, y=y, width=w, height=h,
+        )
+        self.label_store.append(sample)
+        self.ml_predictor.incremental_update(sample)
+        self.logger.info("[SUCCESS] Labeled region saved for '%s'", label.strip())
+        self.status_text.setText(f"وضعیت: برچسب '{label.strip()}' ذخیره شد")
+
+    def _predict_label_position(self) -> None:
+        label, ok = QInputDialog.getText(self, "پیش‌بینی", "نام برچسب:")
+        if not ok or not label.strip():
+            return
+        pred = self.ml_predictor.predict(label.strip())
+        if not pred:
+            QMessageBox.information(self, "اطلاع", "برای این برچسب داده آموزشی وجود ندارد")
+            return
+        x, y, w, h = pred
+        pen = QPen(QColor("#f59e0b")); pen.setWidth(2)
+        self.viewer_scene.addRect(x, y, w, h, pen)
+        self.status_text.setText(f"وضعیت: پیش‌بینی انجام شد برای '{label.strip()}'")
+
     def _run_ocr_current_page(self) -> None:
         if not self.loaded_pages: return
         result = self.ocr_engine.extract_page(self.loaded_pages[self.current_page_index], self.current_page_index)
