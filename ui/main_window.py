@@ -143,9 +143,20 @@ class MainWindow(QMainWindow):
             self.current_page_index = 0; self.zoom_level = 1.0
             self.ocr_results_by_page.clear(); self.detected_fields = []
             self.file_info.setText(f"فایل: {fp.name} | صفحات: {len(self.loaded_pages)}")
+            self._apply_template_on_import(fp.name)
             self._render_current_page()
         except FileLoaderError as exc:
             QMessageBox.warning(self, "خطا", str(exc))
+
+
+    def _apply_template_on_import(self, document_name: str) -> None:
+        template_name, payload = self.template_manager.find_by_document_name(document_name)
+        if not payload:
+            self.logger.info("[INFO] No direct template match for file: %s", document_name)
+            return
+        self._apply_template_payload(payload)
+        self.status_text.setText(f"وضعیت: قالب '{template_name}' خودکار روی فایل جدید اعمال شد")
+        self.logger.info("[SUCCESS] Template '%s' auto-applied on file import", template_name)
 
     def _run_batch_processing(self) -> None:
         if not self.batch_files:

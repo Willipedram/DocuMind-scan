@@ -57,3 +57,12 @@ class TemplateManager:
         if best_score >= threshold:
             return best_name, best_payload
         return None, None
+
+    def find_by_document_name(self, document_name: str) -> tuple[str | None, dict | None]:
+        stem = Path(document_name).stem.lower().strip()
+        for name in self.list_templates():
+            payload = self.load_template(name)
+            doc_type = str(payload.get("document_type", name)).lower().strip()
+            if stem == doc_type or doc_type in stem or stem in doc_type:
+                return name, payload
+        return None, None
